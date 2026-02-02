@@ -1,6 +1,6 @@
 ---
 name: rails-saas-builder
-description: Comprehensive Rails 8.1+ SaaS application development skill for building, reviewing, and implementing features in production-ready Ruby on Rails applications. Use this skill when (1) Building or implementing new features in a Rails SaaS application (e.g., "implement subscription billing", "build admin panel", "add multi-tenancy"), (2) Reviewing existing Rails application architecture, code quality, and best practices, (3) Implementing security patterns for multi-tenant SaaS applications, (4) Setting up Podman containerization for Rails apps, (5) Optimizing database schema and performance, (6) Building full-stack features with Hotwire/Stimulus or React, or (7) Any task involving professional Rails development with focus on security, performance, and maintainability.
+description: Comprehensive Rails 8.1+ SaaS application development skill for building, reviewing, and implementing features in production-ready Ruby on Rails applications. Use this skill when (1) Building or implementing new features in a Rails SaaS application (e.g., "implement subscription billing", "build admin panel", "add multi-tenancy"), (2) Reviewing existing Rails application architecture, code quality, and best practices, (3) Implementing security patterns for multi-tenant SaaS applications, (4) Setting up Podman containerization for Rails apps, (5) Optimizing database schema and performance, (6) Building full-stack features with Hotwire/Stimulus or React, (7) Designing mobile-first responsive UI/UX with Tailwind CSS and DaisyUI, or (8) Any task involving professional Rails development with focus on security, performance, maintainability, and polished user interfaces.
 ---
 
 # Rails SaaS Builder
@@ -306,11 +306,45 @@ export default class extends Controller {
 }
 ```
 
-#### Mobile-First CSS (Tailwind)
-- Use responsive classes: `sm:`, `md:`, `lg:`, `xl:`
+#### Mobile-First CSS (Tailwind + DaisyUI)
+
+**DaisyUI provides pre-built components that work seamlessly with Tailwind CSS.**
+
+Use DaisyUI components for rapid development:
+```erb
+<!-- Buttons -->
+<%= button_to "Submit", path, class: "btn btn-primary" %>
+
+<!-- Cards -->
+<div class="card bg-base-100 shadow-xl">
+  <div class="card-body">
+    <h2 class="card-title">Card Title</h2>
+    <p>Content here</p>
+  </div>
+</div>
+
+<!-- Forms -->
+<div class="form-control w-full">
+  <%= f.label :name, class: "label" do %>
+    <span class="label-text">Name</span>
+  <% end %>
+  <%= f.text_field :name, class: "input input-bordered w-full" %>
+</div>
+
+<!-- Alerts -->
+<div class="alert alert-success">
+  <span>Success message</span>
+</div>
+```
+
+**Responsive Design Principles:**
+- Use Tailwind's responsive breakpoints: `sm:`, `md:`, `lg:`, `xl:`, `2xl:`
 - Mobile-first approach: base styles for mobile, then scale up
-- Touch-friendly: minimum 44x44px tap targets
+- Touch-friendly: minimum 44x44px tap targets (DaisyUI buttons are touch-optimized)
+- Grid layouts: `grid-cols-1 md:grid-cols-2 lg:grid-cols-3`
 - Test on actual mobile devices
+
+**Read references/tailwind-daisyui-design.md for comprehensive component examples, responsive patterns, and mobile optimization techniques.**
 
 ### 6. Security Implementation
 
@@ -507,7 +541,7 @@ podman rm myapp_test
 - Ruby 3.3+
 - PostgreSQL (non-containerized)
 - Hotwire (Turbo + Stimulus)
-- Tailwind CSS
+- Tailwind CSS + DaisyUI
 - Sidekiq for background jobs
 - Podman for containerization
 
@@ -534,6 +568,7 @@ When React is preferred:
 - **security-practices.md**: Security patterns for multi-tenant SaaS including encryption, auth, API security, GDPR, and Philippine payment providers
 - **deployment-podman.md**: Complete Podman containerization guide with production deployment, systemd services, and monitoring
 - **feature-patterns.md**: Detailed implementation patterns for common features like subscription billing and admin panels
+- **tailwind-daisyui-design.md**: Complete UI/UX design guide with Tailwind CSS and DaisyUI components, responsive patterns, mobile-first design, and accessibility best practices
 
 ## Common Features Quick Reference
 
