@@ -56,76 +56,134 @@ Ask the user about specific implementation preferences:
 
 ### 3. Design Database Schema
 
-Design migrations following best practices:
+**IMPORTANT: With database-per-tenant architecture, design schemas differently based on location:**
+
+#### Central Database Tables
+Tables in the central database (tenant registry, plans, global config):
 
 ```ruby
-class CreateFeature < ActiveRecord::Migration[8.1]
+# Central DB: Tenant registry
+class CreateTenants < ActiveRecord::Migration[8.1]
+  def change
+    create_table :tenants, id: :uuid do |t|
+      t.string :name, null: false
+      t.string :slug, null: false  # subdomain
+      t.string :database_name, null: false
+      t.string :status, null: false, default: 'active'
+      t.string :email, null: false
+      
+      t.references :plan, type: :uuid, foreign_key: true
+      t.date :trial_ends_at
+      
+      t.jsonb :settings, default: {}
+      t.timestamps
+    end
+    
+    add_index :tenants, :slug, unique: true
+    add_index :tenants, :database_name, unique: true
+  end
+end
+```
+
+#### Tenant Database Tables
+Tables in each tenant's database (application data):
+
+```ruby
+# Tenant DB: Application tables
+# NO tenant_id column needed - database isolation provides it!
+class CreateFeatures < ActiveRecord::Migration[8.1]
   def change
     create_table :features, id: :uuid do |t|
-      # Multi-tenancy (ALWAYS include)
-      t.references :tenant, type: :uuid, null: false, foreign_key: true, index: true
-      
-      # User association (if applicable)
+      # NO tenant_id - database isolation!
       t.references :user, type: :uuid, null: false, foreign_key: true, index: true
       
-      # Feature-specific columns
       t.string :name, null: false
       t.text :description
       t.string :status, null: false, default: 'active'
       
-      # Metadata for flexibility
       t.jsonb :metadata, default: {}
-      
-      # Timestamps (ALWAYS include)
       t.timestamps
     end
     
-    # Indexes for common queries
     add_index :features, :status
-    add_index :features, [:tenant_id, :status]
+    add_index :features, [:user_id, :status]
   end
 end
 ```
 
 **Database design principles:**
-- UUID primary keys (already configured)
-- Multi-tenancy support on every tenant-scoped table
+- UUID primary keys
+- **NO tenant_id in tenant database tables** (database isolation provides this)
 - Foreign key constraints
-- Proper indexing (especially foreign keys, status fields, frequently queried columns)
+- Proper indexing
 - JSONB for flexible metadata
 - Timestamps for audit trail
+
+**Migration workflow:**
+```bash
+# Central DB migrations
+rails db:migrate
+
+# Tenant DB migrations (runs on all tenant databases)
+rails apartment:migrate
+```
 
 ### 4. Implement Backend
 
 #### Models
+
+**Central Database Models** (in central DB):
 ```ruby
-class Feature < ApplicationRecord
-  # Multi-tenancy (ALWAYS first)
-  acts_as_tenant(:tenant)
+# app/models/tenant.rb
+class Tenant < ApplicationRecord
+  # Lives in central database
+  belongs_to :plan, optional: true
   
-  # Associations
-  belongs_to :tenant
+  validates :name, presence: true
+  validates :slug, presence: true, uniqueness: true
+  validates :database_name, presence: true, uniqueness: true
+  
+  enum status: { trial: 'trial', active: 'active', suspended: 'suspended' }
+  
+  after_create :create_tenant_database
+  
+  def switch!
+    Apartment::Tenant.switch!(database_name)
+  end
+end
+
+# app/models/plan.rb
+class Plan < ApplicationRecord
+  # Lives in central database
+  has_many :tenants
+  validates :name, presence: true, uniqueness: true
+end
+```
+
+**Tenant Database Models** (in each tenant's DB):
+```ruby
+# app/models/feature.rb
+class Feature < ApplicationRecord
+  # Lives in tenant database
+  # NO tenant_id - database isolation!
+  # NO acts_as_tenant needed!
+  
   belongs_to :user
   
-  # Validations
   validates :name, presence: true
   validates :status, presence: true, inclusion: { in: %w[active inactive] }
   
-  # Enums for state management
   enum status: { active: 'active', inactive: 'inactive' }
   
-  # Scopes for common queries
   scope :active_features, -> { where(status: 'active') }
   scope :recent, -> { order(created_at: :desc) }
   
-  # Callbacks (use sparingly)
   after_create :notify_creation
   
   private
   
   def notify_creation
-    # Move heavy work to background jobs
-    NotifyFeatureCreatedJob.perform_later(id)
+    NotifyFeatureCreatedJob.perform_later(id, tenant_database_name: Apartment::Tenant.current)
   end
 end
 ```
@@ -168,15 +226,25 @@ end
 
 #### Controllers
 ```ruby
-class FeaturesController < ApplicationController
+class ApplicationController < ActionController::Base
   before_action :authenticate_user!
+  
+  # Current tenant automatically set by Apartment middleware
+  def current_tenant
+    @current_tenant ||= Tenant.find_by(database_name: Apartment::Tenant.current)
+  end
+  helper_method :current_tenant
+end
+
+class FeaturesController < ApplicationController
   before_action :set_feature, only: [:show, :edit, :update, :destroy]
   
   def index
-    @features = current_tenant.features
-                              .includes(:user)
-                              .order(created_at: :desc)
-                              .page(params[:page])
+    # Automatically scoped to current tenant's database
+    # NO tenant scoping needed!
+    @features = Feature.includes(:user)
+                       .order(created_at: :desc)
+                       .page(params[:page])
     authorize @features
   end
   
@@ -211,7 +279,8 @@ class FeaturesController < ApplicationController
   private
   
   def set_feature
-    @feature = current_tenant.features.find(params[:id])
+    # Automatically scoped to tenant database
+    @feature = Feature.find(params[:id])
   end
   
   def feature_params
@@ -350,28 +419,57 @@ Use DaisyUI components for rapid development:
 
 **CRITICAL: Security must be verified at every step.**
 
-#### Multi-tenancy Isolation
+#### Multi-tenancy Isolation (Database-per-Tenant)
+
+**CRITICAL: This application uses database-per-tenant architecture for maximum security and isolation.**
+
+Each tenant gets their own PostgreSQL database, providing:
+- Complete data isolation
+- Performance isolation
+- Individual backups
+- Regulatory compliance
+- Scalability across servers
+
 ```ruby
-# ALWAYS scope queries to current tenant
-class ApplicationController < ActionController::Base
-  set_current_tenant_through_filter
-  before_action :set_tenant
+# Central database stores tenant registry
+class Tenant < ApplicationRecord
+  validates :slug, presence: true, uniqueness: true
+  validates :database_name, presence: true, uniqueness: true
   
-  def set_tenant
-    if current_user
-      set_current_tenant(current_user.tenant)
-    else
-      set_current_tenant(nil)
-    end
+  after_create :create_tenant_database
+  
+  def switch!
+    Apartment::Tenant.switch!(database_name)
   end
 end
 
-# NEVER write queries like this:
-Feature.find(params[:id])  # ❌ DANGEROUS - no tenant scoping
+# Tenant databases contain application data
+# NO tenant_id columns needed - database isolation provides security!
+class Post < ApplicationRecord
+  belongs_to :user
+  # Automatically scoped to current tenant's database
+end
 
-# ALWAYS write queries like this:
-current_tenant.features.find(params[:id])  # ✅ SAFE - tenant scoped
+# Controllers automatically work with current tenant DB
+class PostsController < ApplicationController
+  def index
+    @posts = Post.all  # Only from current tenant's database
+  end
+end
 ```
+
+**Apartment Middleware** automatically switches databases based on subdomain:
+- `acme.myapp.com` → switches to `myapp_acme_production` database
+- `widget.myapp.com` → switches to `myapp_widget_production` database
+
+**Key Differences from Row-Level Tenancy:**
+- ✅ NO `tenant_id` columns in tenant database tables
+- ✅ NO `acts_as_tenant` on application models
+- ✅ NO manual tenant scoping in queries
+- ✅ Database-level isolation automatically enforced
+- ✅ Central database for tenant registry only
+
+**Read references/database-per-tenant.md for complete implementation including tenant provisioning, migrations, backups, and connection pool management.**
 
 #### Authorization (Pundit)
 ```ruby
@@ -403,24 +501,39 @@ end
 
 ### 7. Background Jobs
 
-Use Sidekiq for heavy operations:
+Use Sidekiq for heavy operations with tenant context:
 
 ```ruby
-# app/jobs/process_feature_job.rb
-class ProcessFeatureJob < ApplicationJob
-  queue_as :default
+# app/jobs/application_job.rb
+class ApplicationJob < ActiveJob::Base
+  around_perform :switch_tenant
   
-  def perform(feature_id, tenant_id)
-    # Set tenant context for multi-tenancy
-    ActsAsTenant.with_tenant(Tenant.find(tenant_id)) do
-      feature = Feature.find(feature_id)
-      # Process feature
+  private
+  
+  def switch_tenant
+    if arguments.first.is_a?(Hash) && arguments.first[:tenant_database_name]
+      Apartment::Tenant.switch!(arguments.first[:tenant_database_name]) do
+        yield
+      end
+    else
+      yield
     end
   end
 end
 
+# app/jobs/process_feature_job.rb
+class ProcessFeatureJob < ApplicationJob
+  queue_as :default
+  
+  def perform(feature_id, tenant_database_name:)
+    # Automatically switches to correct tenant database
+    feature = Feature.find(feature_id)
+    # Process feature
+  end
+end
+
 # Usage in controller/service
-ProcessFeatureJob.perform_later(feature.id, current_tenant.id)
+ProcessFeatureJob.perform_later(feature.id, tenant_database_name: Apartment::Tenant.current)
 ```
 
 ### 8. Testing
@@ -540,6 +653,7 @@ podman rm myapp_test
 - Rails 8.1.2
 - Ruby 3.3+
 - PostgreSQL (non-containerized)
+- **Apartment gem** (database-per-tenant multi-tenancy)
 - Hotwire (Turbo + Stimulus)
 - Tailwind CSS + DaisyUI
 - Sidekiq for background jobs
@@ -548,7 +662,7 @@ podman rm myapp_test
 ### Authentication & Authorization
 - Devise for authentication
 - Pundit or CanCanCan for authorization
-- acts_as_tenant for multi-tenancy
+- Apartment gem for database-per-tenant multi-tenancy
 
 ### Payment Providers (Philippines)
 - **Local**: PayMongo, Maya (PayMaya)
@@ -569,6 +683,7 @@ When React is preferred:
 - **deployment-podman.md**: Complete Podman containerization guide with production deployment, systemd services, and monitoring
 - **feature-patterns.md**: Detailed implementation patterns for common features like subscription billing and admin panels
 - **tailwind-daisyui-design.md**: Complete UI/UX design guide with Tailwind CSS and DaisyUI components, responsive patterns, mobile-first design, and accessibility best practices
+- **database-per-tenant.md**: Complete guide to database-per-tenant multi-tenancy architecture using Apartment gem, including tenant provisioning, migrations, backups, connection pooling, and monitoring
 
 ## Common Features Quick Reference
 
@@ -585,11 +700,15 @@ When React is preferred:
 - Authorization: Role-based with Pundit
 - See references/feature-patterns.md for complete implementation
 
-### Multi-tenancy
-- Use acts_as_tenant gem
-- Scope all queries: `current_tenant.resources.find(id)`
-- Add tenant_id to all tenant-scoped tables
-- Test isolation thoroughly
+### Multi-tenancy (Database-per-Tenant)
+- Use Apartment gem for database isolation
+- Central database for tenant registry (Tenant, Plan models)
+- Each tenant gets own database (User, Post, etc. models)
+- NO `tenant_id` columns in tenant databases
+- Subdomain-based switching: `acme.myapp.com` → `myapp_acme_production`
+- Migrations: `rails apartment:migrate` (runs on all tenant DBs)
+- Background jobs: Pass `tenant_database_name: Apartment::Tenant.current`
+- See references/database-per-tenant.md for complete implementation
 
 ### API Development
 - Namespace: `Api::V1::ResourcesController`
@@ -600,10 +719,13 @@ When React is preferred:
 
 ## Key Reminders
 
-- **Multi-tenancy first**: ALWAYS scope queries to current tenant
-- **Security**: Verify authorization on every action
-- **Performance**: Optimize queries, add indexes, use background jobs
-- **Mobile-first**: Ensure responsive design, touch-friendly UI
+- **Database-per-tenant**: Each tenant gets own database - NO tenant_id columns in tenant tables
+- **Apartment gem**: Handles database switching automatically based on subdomain
+- **Security**: Database-level isolation provides maximum security
+- **Migrations**: Use `rails apartment:migrate` to run on all tenant databases
+- **Background jobs**: Always pass `tenant_database_name: Apartment::Tenant.current`
+- **Performance**: Monitor connection pools, optimize queries, use background jobs
+- **Mobile-first**: Ensure responsive design with Tailwind + DaisyUI, touch-friendly UI
 - **Maintainability**: Write clear code that junior devs can understand
-- **Testing**: Test critical paths, multi-tenancy isolation
+- **Testing**: Test tenant isolation, central vs tenant database logic
 - **Deployment**: Test in Podman before production deployment

@@ -2,6 +2,44 @@
 
 ## Multi-Tenancy Isolation
 
+### Database-per-Tenant Architecture (Primary Approach)
+
+This application uses **database-per-tenant** architecture for maximum security and isolation.
+
+**Benefits:**
+- Complete data isolation at database level
+- No risk of cross-tenant data leaks from application bugs
+- Performance isolation (one tenant's load doesn't affect others)
+- Individual backups and restores per tenant
+- Easier regulatory compliance (GDPR, data residency)
+- Scalability across multiple database servers
+- Database-level encryption and access control
+
+**Implementation with Apartment gem:**
+```ruby
+# config/initializers/apartment.rb
+Apartment.configure do |config|
+  # Each tenant gets own database
+  config.tenant_names = lambda { Tenant.pluck(:database_name) }
+  
+  # Central models (excluded from tenant databases)
+  config.excluded_models = %w[Tenant Plan AdminUser Feature]
+end
+
+# Automatic database switching via subdomain
+Rails.application.config.middleware.use Apartment::Elevators::Subdomain
+```
+
+**Security Advantages:**
+- SQL injection attacks limited to single tenant database
+- No accidental cross-tenant queries possible (database isolation)
+- Database-level access control and permissions
+- Separate connection pools per tenant
+- Individual encryption keys per tenant database
+- Complete audit trail per tenant
+
+**See references/database-per-tenant.md for complete implementation.**
+
 ### UUID Primary Keys (Already Implemented)
 ```ruby
 # config/application.rb or config/initializers/generators.rb
