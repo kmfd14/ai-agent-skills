@@ -9,6 +9,8 @@ Expert Rails 8.1+ development skill for building production-ready SaaS applicati
 
 ## Implementation Workflow
 
+**CRITICAL: Always use Rails generators (`rails generate`) to create migrations, models, and controllers. Never manually create these files.**
+
 Follow this systematic approach for all feature implementations and reviews:
 
 ### 1. Analyze Existing Structure
@@ -56,87 +58,143 @@ Ask the user about specific implementation preferences:
 
 ### 3. Design Database Schema
 
-**IMPORTANT: With database-per-tenant architecture, design schemas differently based on location:**
+**CRITICAL: Always use Rails generators to create migrations and models.**
 
-#### Central Database Tables
-Tables in the central database (tenant registry, plans, global config):
+#### Generate Migrations with Rails Commands
 
-```ruby
-# Central DB: Tenant registry
-class CreateTenants < ActiveRecord::Migration[8.1]
-  def change
-    create_table :tenants, id: :uuid do |t|
-      t.string :name, null: false
-      t.string :slug, null: false  # subdomain
-      t.string :database_name, null: false
-      t.string :status, null: false, default: 'active'
-      t.string :email, null: false
-      
-      t.references :plan, type: :uuid, foreign_key: true
-      t.date :trial_ends_at
-      
-      t.jsonb :settings, default: {}
-      t.timestamps
-    end
-    
-    add_index :tenants, :slug, unique: true
-    add_index :tenants, :database_name, unique: true
-  end
-end
+**Central Database Migrations:**
+```bash
+# Use rails generate migration
+rails generate migration CreateTenants name:string slug:string:uniq database_name:string:uniq status:string email:string plan:references
+
+# Then edit the generated migration to add constraints:
+# - null: false
+# - foreign_key: true
+# - Custom indexes
+# - Default values
 ```
 
-#### Tenant Database Tables
-Tables in each tenant's database (application data):
+**Tenant Database Migrations:**
+```bash
+# NO tenant_id needed with database-per-tenant!
+rails generate migration CreatePosts user:references title:string content:text published:boolean status:string
+
+rails generate migration AddMetadataToPosts metadata:jsonb
+```
+
+**Always review and edit generated migrations before running:**
 
 ```ruby
-# Tenant DB: Application tables
-# NO tenant_id column needed - database isolation provides it!
-class CreateFeatures < ActiveRecord::Migration[8.1]
+# db/migrate/XXXXXX_create_posts.rb (after editing)
+class CreatePosts < ActiveRecord::Migration[8.1]
   def change
-    create_table :features, id: :uuid do |t|
+    create_table :posts, id: :uuid do |t|
       # NO tenant_id - database isolation!
       t.references :user, type: :uuid, null: false, foreign_key: true, index: true
       
-      t.string :name, null: false
-      t.text :description
-      t.string :status, null: false, default: 'active'
+      t.string :title, null: false
+      t.text :content, null: false
+      t.boolean :published, default: false, null: false
+      t.string :status, default: 'draft', null: false
       
       t.jsonb :metadata, default: {}
       t.timestamps
     end
     
-    add_index :features, :status
-    add_index :features, [:user_id, :status]
+    # Add custom indexes
+    add_index :posts, :status
+    add_index :posts, [:user_id, :status]
   end
 end
 ```
 
-**Database design principles:**
-- UUID primary keys
-- **NO tenant_id in tenant database tables** (database isolation provides this)
-- Foreign key constraints
-- Proper indexing
-- JSONB for flexible metadata
-- Timestamps for audit trail
-
 **Migration workflow:**
 ```bash
-# Central DB migrations
+# 1. Generate migration
+rails generate migration CreatePosts user:references title:string content:text
+
+# 2. Review generated file
+cat db/migrate/XXXXXX_create_posts.rb
+
+# 3. Edit to add constraints and indexes
+
+# 4. Run migration
+# Central DB:
 rails db:migrate
 
-# Tenant DB migrations (runs on all tenant databases)
+# Tenant DBs (runs on ALL tenant databases):
 rails apartment:migrate
 ```
 
+**Read references/rails-generators.md for complete guide to generating migrations, models, controllers, and other files.**
+
 ### 4. Implement Backend
 
-#### Models
+#### Generate Models with Rails Commands
 
-**Central Database Models** (in central DB):
+**ALWAYS use `rails generate model` to create models and migrations together.**
+
+**Central Database Models:**
+```bash
+# Generate Tenant model (lives in central DB)
+rails generate model Tenant name:string slug:string:uniq database_name:string:uniq status:string email:string plan:references
+
+# Generate Plan model (lives in central DB)
+rails generate model Plan name:string:uniq price:decimal billing_period:string max_users:integer
+```
+
+**Tenant Database Models:**
+```bash
+# Generate application models (live in each tenant's DB)
+# NO tenant_id needed!
+
+rails generate model Post user:references title:string content:text published:boolean status:string
+
+rails generate model Comment user:references post:references content:text approved:boolean
+
+# With Devise
+rails generate devise User
+```
+
+**After generating, immediately customize the model:**
+
 ```ruby
-# app/models/tenant.rb
+# app/models/post.rb (Tenant database model)
+class Post < ApplicationRecord
+  # NO acts_as_tenant needed with database-per-tenant!
+  
+  # Associations
+  belongs_to :user
+  has_many :comments, dependent: :destroy
+  
+  # Validations
+  validates :title, presence: true, length: { maximum: 255 }
+  validates :content, presence: true
+  validates :status, presence: true, inclusion: { in: %w[draft published archived] }
+  
+  # Enums
+  enum status: {
+    draft: 'draft',
+    published: 'published',
+    archived: 'archived'
+  }
+  
+  # Scopes
+  scope :published, -> { where(published: true) }
+  scope :recent, -> { order(created_at: :desc) }
+  
+  # Callbacks (use sparingly)
+  after_create :notify_creation
+  
+  private
+  
+  def notify_creation
+    NotifyPostCreatedJob.perform_later(id, tenant_database_name: Apartment::Tenant.current)
+  end
+end
+
+# app/models/tenant.rb (Central database model)
 class Tenant < ApplicationRecord
-  # Lives in central database
   belongs_to :plan, optional: true
   
   validates :name, presence: true
@@ -149,41 +207,6 @@ class Tenant < ApplicationRecord
   
   def switch!
     Apartment::Tenant.switch!(database_name)
-  end
-end
-
-# app/models/plan.rb
-class Plan < ApplicationRecord
-  # Lives in central database
-  has_many :tenants
-  validates :name, presence: true, uniqueness: true
-end
-```
-
-**Tenant Database Models** (in each tenant's DB):
-```ruby
-# app/models/feature.rb
-class Feature < ApplicationRecord
-  # Lives in tenant database
-  # NO tenant_id - database isolation!
-  # NO acts_as_tenant needed!
-  
-  belongs_to :user
-  
-  validates :name, presence: true
-  validates :status, presence: true, inclusion: { in: %w[active inactive] }
-  
-  enum status: { active: 'active', inactive: 'inactive' }
-  
-  scope :active_features, -> { where(status: 'active') }
-  scope :recent, -> { order(created_at: :desc) }
-  
-  after_create :notify_creation
-  
-  private
-  
-  def notify_creation
-    NotifyFeatureCreatedJob.perform_later(id, tenant_database_name: Apartment::Tenant.current)
   end
 end
 ```
@@ -224,67 +247,100 @@ class Features::CreateService
 end
 ```
 
-#### Controllers
-```ruby
-class ApplicationController < ActionController::Base
-  before_action :authenticate_user!
-  
-  # Current tenant automatically set by Apartment middleware
-  def current_tenant
-    @current_tenant ||= Tenant.find_by(database_name: Apartment::Tenant.current)
-  end
-  helper_method :current_tenant
-end
+#### Generate Controllers with Rails Commands
 
-class FeaturesController < ApplicationController
-  before_action :set_feature, only: [:show, :edit, :update, :destroy]
+**ALWAYS use `rails generate controller` to create controllers.**
+
+```bash
+# Generate controller with actions
+rails generate controller Posts index show new create edit update destroy
+
+# Generate empty controller
+rails generate controller Posts
+
+# Generate scaffold (complete CRUD: model, migration, controller, views)
+rails generate scaffold Post user:references title:string content:text status:string
+
+# Generate namespaced controller
+rails generate controller Admin::Posts index show edit update
+```
+
+**After generating, customize the controller:**
+
+```ruby
+# app/controllers/posts_controller.rb
+class PostsController < ApplicationController
+  before_action :authenticate_user!
+  before_action :set_post, only: [:show, :edit, :update, :destroy]
   
   def index
     # Automatically scoped to current tenant's database
-    # NO tenant scoping needed!
-    @features = Feature.includes(:user)
-                       .order(created_at: :desc)
-                       .page(params[:page])
-    authorize @features
+    @posts = Post.includes(:user)
+                 .order(created_at: :desc)
+                 .page(params[:page])
+    authorize @posts
   end
   
   def show
-    authorize @feature
+    authorize @post
+  end
+  
+  def new
+    @post = Post.new
+    authorize @post
   end
   
   def create
-    service = Features::CreateService.new(current_user, feature_params)
-    @feature = service.call
-    
-    authorize @feature
+    @post = current_user.posts.build(post_params)
+    authorize @post
     
     respond_to do |format|
-      format.html { redirect_to @feature, notice: 'Feature created successfully.' }
-      format.turbo_stream
+      if @post.save
+        format.html { redirect_to @post, notice: 'Post created successfully.' }
+        format.turbo_stream
+      else
+        format.html { render :new, status: :unprocessable_entity }
+        format.turbo_stream { 
+          render turbo_stream: turbo_stream.replace('post_form', 
+            partial: 'posts/form', 
+            locals: { post: @post })
+        }
+      end
     end
-  rescue => e
+  end
+  
+  def update
+    authorize @post
+    
     respond_to do |format|
-      format.html { 
-        flash.now[:alert] = e.message
-        render :new, status: :unprocessable_entity 
-      }
-      format.turbo_stream { 
-        render turbo_stream: turbo_stream.replace('feature_form', 
-          partial: 'features/form', 
-          locals: { feature: @feature, error: e.message })
-      }
+      if @post.update(post_params)
+        format.html { redirect_to @post, notice: 'Post updated successfully.' }
+        format.turbo_stream
+      else
+        format.html { render :edit, status: :unprocessable_entity }
+      end
+    end
+  end
+  
+  def destroy
+    authorize @post
+    @post.destroy
+    
+    respond_to do |format|
+      format.html { redirect_to posts_url, notice: 'Post deleted.' }
+      format.turbo_stream
     end
   end
   
   private
   
-  def set_feature
+  def set_post
     # Automatically scoped to tenant database
-    @feature = Feature.find(params[:id])
+    @post = Post.find(params[:id])
   end
   
-  def feature_params
-    params.require(:feature).permit(:name, :description, :status)
+  def post_params
+    params.require(:post).permit(:title, :content, :published, :status)
   end
 end
 ```
@@ -620,6 +676,13 @@ podman rm myapp_test
 
 ## Code Quality Standards
 
+### Use Rails Generators
+
+1. **Always use generators**: `rails generate model`, `rails generate controller`, `rails generate migration`
+2. **Review generated code**: Check migrations before running, customize models/controllers after generation
+3. **Follow Rails conventions**: Let generators guide file structure and naming
+4. **Add constraints immediately**: Edit migrations to add `null: false`, indexes, foreign keys before running
+
 ### Maintainability for Junior Developers
 
 1. **Clear naming**: Use descriptive variable and method names
@@ -678,6 +741,7 @@ When React is preferred:
 ## Bundled Resources
 
 ### References
+- **rails-generators.md**: Complete guide to Rails generators for creating migrations, models, controllers, jobs, mailers, and more with proper commands and examples
 - **architecture-review.md**: Comprehensive checklist for reviewing Rails application structure
 - **security-practices.md**: Security patterns for multi-tenant SaaS including encryption, auth, API security, GDPR, and Philippine payment providers
 - **deployment-podman.md**: Complete Podman containerization guide with production deployment, systemd services, and monitoring
@@ -719,6 +783,7 @@ When React is preferred:
 
 ## Key Reminders
 
+- **Rails generators**: ALWAYS use `rails generate` for migrations, models, controllers - never create manually
 - **Database-per-tenant**: Each tenant gets own database - NO tenant_id columns in tenant tables
 - **Apartment gem**: Handles database switching automatically based on subdomain
 - **Security**: Database-level isolation provides maximum security
